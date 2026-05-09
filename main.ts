@@ -1,3 +1,4 @@
+// main.ts - Deno Deploy entrypoint
 const TARGET = Deno.env.get("TARGET_DOMAIN")?.replace(/\/$/, "");
 
 async function handleRequest(req: Request): Promise<Response> {
