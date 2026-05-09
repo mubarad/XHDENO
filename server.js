@@ -1,70 +1,83 @@
+// server.js - Node.js proxy for Railway
 import express from 'express';
 
 const app = express();
 const TARGET = process.env.TARGET_DOMAIN?.replace(/\/$/, "");
 
 if (!TARGET) {
-  console.error("❌ Missing TARGET_DOMAIN environment variable");
+  console.error("❌ TARGET_DOMAIN not set");
   process.exit(1);
 }
 
-console.log(`✅ Target: ${TARGET}`);
+console.log(`✅ Proxying to: ${TARGET}`);
 
-// Disable Express body parsing - we proxy raw bodies
-app.use(express.raw({ type: '*/*', limit: '10mb' }));
+// Capture raw body for proxying
+app.use((req, res, next) => {
+  const chunks = [];
+  req.on('data', chunk => chunks.push(chunk));
+  req.on('end', () => {
+    req.rawBody = chunks.length > 0 ? Buffer.concat(chunks) : null;
+    next();
+  });
+});
 
 app.all('*', async (req, res) => {
   const path = req.url;
   const targetUrl = TARGET + path;
 
-  // Forward headers (exclude hop-by-hop)
+  // ✅ Fix: Use Object.entries() for Express headers (plain object)
   const headers = {};
   for (const [key, value] of Object.entries(req.headers)) {
     const k = key.toLowerCase();
-    if (["host", "connection", "keep-alive", "transfer-encoding", "upgrade"].includes(k) || 
-        k.startsWith("x-vercel") || k.startsWith("x-forwarded") || k === "cf-connecting-ip") {
+    if (['host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'content-length'].includes(k) || 
+        k.startsWith('x-vercel') || k.startsWith('x-forwarded') || k === 'cf-connecting-ip') {
       continue;
     }
     headers[key] = value;
+  }
+
+  // Add content-length if body exists
+  if (req.rawBody?.length > 0) {
+    headers['content-length'] = req.rawBody.length.toString();
   }
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     
-    const upstream = await fetch(targetUrl, {
+    const response = await fetch(targetUrl, {
       method: req.method,
       headers,
-      body: req.method !== "GET" && req.method !== "HEAD" ? req.body : null,
-      duplex: "half",
-      redirect: "manual",
+      body: req.rawBody,
+      redirect: 'manual',
       signal: controller.signal,
+      duplex: 'half',
     });
 
     clearTimeout(timeout);
 
-    // Copy response
-    res.status(upstream.status);
-    upstream.headers.forEach((value, key) => {
-      res.set(key, value);
+    // Send response
+    res.status(response.status);
+    response.headers.forEach((value, key) => {
+      res.setHeader(key, value);
     });
 
-    // Send body
-    const arrayBuffer = await upstream.arrayBuffer();
-    res.send(Buffer.from(arrayBuffer));
-    
+    const buffer = await response.arrayBuffer();
+    res.send(Buffer.from(buffer));
+
   } catch (err) {
-    console.error("❌ Proxy error:", err.message);
-    res.status(502).send("Upstream error: " + err.message);
+    console.error('❌ Proxy error:', err.message);
+    res.status(502).json({ error: 'Upstream failed', details: err.message });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', target: TARGET });
+  res.json({ status: 'ok', target: TARGET, time: new Date().toISOString() });
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 XHTTP Relay listening on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
